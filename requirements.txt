@@ -1,0 +1,14 @@
+# Core dependencies
+opencv-python>=4.8.0
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.23.0
+requests>=2.31.0
+pandas>=1.5.3
+
+# For YOLOv5 model from ultralytics hub
+# NOTE: torch.hub will auto-download the model, but you still need PyYAML
+PyYAML>=6.0
+
+# Optional (for logging enhancement, not required)
+tqdm>=4.65.0
