@@ -1,0 +1,15 @@
+# Virtual environment
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Output files
+output_clips/
+
+# Model files
+*.pt
+*.pth
+
+# Large data files
+*.mp4
