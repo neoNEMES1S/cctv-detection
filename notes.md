@@ -1,0 +1,3 @@
+- ATM being picked up and taken away
+- Vehicle breaking door of ATM and ATM being transported (Ram raid)
+- 

@@ -19,10 +19,11 @@ import time
 warnings.filterwarnings('ignore')
 
 class Config:
-    VIDEO_PATH: str = "94.mp4"
+    VIDEO_PATH: str = "2.mp4"
     OUTPUT_DIR: str = "output_clips"
-    FRAME_SKIP: int = 60  # Process one frame every 2 seconds
+    FRAME_SKIP: int = 90  # Increased to process even fewer frames
     # Enhanced detection classes for ATM/Bank scenarios
+    # Reduced list to only essential classes
     DETECTION_CLASSES: List[str] = [
         'person',        # To detect presence of people
         'truck',         # For vehicle-based ATM theft
@@ -30,46 +31,54 @@ class Config:
         'backpack',     # Potential tool carriers
         'suitcase',     # Suspicious large containers
         'handbag',      # Potential tool carriers
-        'mask',         # Face coverings
-        'tie',          # To detect formal wear (to spot unusual formal wear at odd hours)
+        'scissors',     # Common tampering tool
+        'knife',        # Potential tampering tool
+        'screwdriver',  # Common tampering tool
+        'laptop',       # Potential skimming device
+        'cell phone',   # Potential recording device
     ]
-    CLIP_DURATION_SECONDS: int = 10  # Increased to capture more context
+    CLIP_DURATION_SECONDS: int = 15  # Reduced for faster processing
     FPS: int = 30
     UPLOAD_URL: Optional[str] = "https://your-api-endpoint.com/upload"
     YOLO_MODEL: str = 'yolov5s'  # Using small model for better accuracy
-    CONFIDENCE_THRESHOLD: float = 0.3  # Lowered threshold for better detection
+    CONFIDENCE_THRESHOLD: float = 0.3  # Increased to reduce false positives
     
     # Add time-based detection parameters
     SUSPICIOUS_HOUR_START: int = 22  # 10 PM
     SUSPICIOUS_HOUR_END: int = 5     # 5 AM
     
-    # Add specific scenarios
+    # Add specific scenarios - reduced to key scenarios only
     SUSPICIOUS_SCENARIOS = {
-        'multiple_people_night': {
-            'min_people': 2,
-            'time_range': 'night',
-            'confidence': 0.4
-        },
-        'vehicle_near_atm': {
-            'distance_threshold': 100,  # pixels
-            'vehicle_types': ['truck', 'car', 'van'],
-            'confidence': 0.45
-        },
-        'masked_person': {
-            'required_objects': ['person', 'mask'],
-            'confidence': 0.5
-        },
         'tool_carrier': {
             'person_with_objects': ['backpack', 'suitcase', 'handbag'],
-            'confidence': 0.4
+            'confidence': 0.3
+        },
+        'atm_tampering': {
+            'required_objects': ['person'],
+            'suspicious_tools': ['scissors', 'knife', 'screwdriver'],
+            'min_tools': 1,
+            'confidence': 0.3,
+            'max_distance': 300,  # Increased distance threshold
+            'min_duration': 2  # Reduced minimum seconds of suspicious activity
+        },
+        'manual_atm_tampering': {
+            'detection_zone': {
+                'top_percent': 0.3,      # Top 30% of frame is ATM zone
+                'bottom_percent': 0.7,   # Bottom 70% of frame is person zone
+                'left_percent': 0.1,     # Left margin
+                'right_percent': 0.9,    # Right margin
+            },
+            'hand_in_atm_time': 1,       # Reduced time requirement
+            'confidence': 0.25,
+            'min_duration': 1           # Reduced time requirement
         }
     }
 
     # Add performance optimization
-    PROCESSING_RESOLUTION: Tuple[int, int] = (480, 360)  # Even smaller resolution
-    ENABLE_BATCH_PROCESSING: bool = False  # Disable batch processing for faster single frame analysis
-    ENABLE_CUDA: bool = True  # Enable GPU if available
-    BATCH_SIZE: int = 10  # Added batch size
+    PROCESSING_RESOLUTION: Tuple[int, int] = (320, 240)  # Reduced resolution for faster processing
+    ENABLE_BATCH_PROCESSING: bool = False
+    ENABLE_CUDA: bool = True
+    BATCH_SIZE: int = 1
 
 logging.basicConfig(
     level=logging.INFO,
@@ -155,28 +164,95 @@ class ThreatDetector:
                 cv2.putText(frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
     def _analyze_scenarios(self, detections) -> Tuple[bool, str]:
-        # 1. Multiple people at night
-        if datetime.now().hour >= self.config.SUSPICIOUS_HOUR_START or            datetime.now().hour <= self.config.SUSPICIOUS_HOUR_END:
-            people_count = len(detections[detections['name'] == 'person'])
-            if people_count >= self.config.SUSPICIOUS_SCENARIOS['multiple_people_night']['min_people']:
-                return True, "multiple_people_night"
-        
-        # 2. Vehicle near ATM
-        vehicles = detections[detections['name'].isin(self.config.SUSPICIOUS_SCENARIOS['vehicle_near_atm']['vehicle_types'])]
-        if not vehicles.empty:
-            return True, "vehicle_near_atm"
-        
-        # 3. Masked person detection
-        masked_people = set(detections[detections['name'] == 'person'].index) & set(detections[detections['name'] == 'mask'].index)
-        if masked_people:
-            return True, "masked_person"
-            
-        # 4. Person with suspicious objects
+        # Simplified detection history tracking
+        if not hasattr(self, 'detection_history'):
+            self.detection_history = {
+                'atm_tampering': {'start_time': None, 'count': 0},
+                'manual_atm_tampering': {'start_time': None, 'count': 0, 'hand_in_zone_start': None}
+            }
+
+        current_time = time.time()
+        # Get frame dimensions for zone calculations
+        frame_height, frame_width = 240, 320  # Default from PROCESSING_RESOLUTION
+
+        # Quick exit if no people detected
         people = detections[detections['name'] == 'person']
-        suspicious_objects = detections[detections['name'].isin(self.config.SUSPICIOUS_SCENARIOS['tool_carrier']['person_with_objects'])]
-        if not people.empty and not suspicious_objects.empty:
-            return True, "suspicious_objects"
+        if people.empty:
+            return False, ""
             
+        # 1. Person with suspicious objects - quick check
+        suspicious_objects = detections[detections['name'].isin(self.config.SUSPICIOUS_SCENARIOS['tool_carrier']['person_with_objects'])]
+        if not suspicious_objects.empty:
+            return True, "suspicious_objects"
+
+        # 2. ATM Tampering Detection - only check if relevant tools detected
+        tools = detections[detections['name'].isin(self.config.SUSPICIOUS_SCENARIOS['atm_tampering']['suspicious_tools'])]
+        
+        if not tools.empty:
+            # Check if any person is close to any tool
+            for _, person in people.iterrows():
+                person_center = ((person['xmin'] + person['xmax']) / 2, (person['ymin'] + person['ymax']) / 2)
+                
+                for _, tool in tools.iterrows():
+                    tool_center = ((tool['xmin'] + tool['xmax']) / 2, (tool['ymin'] + tool['ymax']) / 2)
+                    
+                    # Calculate distance between person and tool
+                    distance = np.sqrt((person_center[0] - tool_center[0])**2 + (person_center[1] - tool_center[1])**2)
+                    
+                    if distance <= self.config.SUSPICIOUS_SCENARIOS['atm_tampering']['max_distance']:
+                        # Update detection history
+                        if self.detection_history['atm_tampering']['start_time'] is None:
+                            self.detection_history['atm_tampering']['start_time'] = current_time
+                        self.detection_history['atm_tampering']['count'] += 1
+                        
+                        # Check if the suspicious activity has lasted long enough
+                        duration = current_time - self.detection_history['atm_tampering']['start_time']
+                        if duration >= self.config.SUSPICIOUS_SCENARIOS['atm_tampering']['min_duration']:
+                            return True, "atm_tampering"
+                    else:
+                        # Reset detection history if distance is too large
+                        self.detection_history['atm_tampering'] = {'start_time': None, 'count': 0}
+
+        # 3. Manual ATM Tampering Detection (no tools required)
+        # Define ATM zone
+        zone = self.config.SUSPICIOUS_SCENARIOS['manual_atm_tampering']['detection_zone']
+        atm_zone_top = int(frame_height * zone['top_percent'])
+        atm_zone_bottom = int(frame_height * zone['bottom_percent'])
+        atm_zone_left = int(frame_width * zone['left_percent'])
+        atm_zone_right = int(frame_width * zone['right_percent'])
+        
+        for _, person in people.iterrows():
+            # Check if person's hands (upper part of bounding box) are in ATM zone
+            person_hands_y = person['ymin'] + (person['ymax'] - person['ymin']) * 0.3  # Approximate hand position
+            person_center_x = (person['xmin'] + person['xmax']) / 2
+            
+            hands_in_atm_zone = (
+                person_hands_y <= atm_zone_bottom and 
+                person_hands_y >= atm_zone_top and
+                person_center_x >= atm_zone_left and 
+                person_center_x <= atm_zone_right
+            )
+            
+            if hands_in_atm_zone:
+                # Check if this is the first time hands are detected in zone
+                if self.detection_history['manual_atm_tampering']['hand_in_zone_start'] is None:
+                    self.detection_history['manual_atm_tampering']['hand_in_zone_start'] = current_time
+                
+                # Start tracking suspicious behavior if hands have been in ATM zone long enough
+                hands_duration = current_time - self.detection_history['manual_atm_tampering']['hand_in_zone_start']
+                if hands_duration >= self.config.SUSPICIOUS_SCENARIOS['manual_atm_tampering']['hand_in_atm_time']:
+                    if self.detection_history['manual_atm_tampering']['start_time'] is None:
+                        self.detection_history['manual_atm_tampering']['start_time'] = current_time
+                    
+                    self.detection_history['manual_atm_tampering']['count'] += 1
+                    duration = current_time - self.detection_history['manual_atm_tampering']['start_time']
+                    
+                    if duration >= self.config.SUSPICIOUS_SCENARIOS['manual_atm_tampering']['min_duration']:
+                        return True, "manual_atm_tampering"
+            else:
+                # Reset hand zone tracking if hands are no longer in zone
+                self.detection_history['manual_atm_tampering']['hand_in_zone_start'] = None
+        
         return False, ""
 
 
@@ -197,32 +273,37 @@ class VideoProcessor:
         self.last_process_time = time.time()
         
         # Calculate actual frame skip based on original video FPS
-        self.effective_frame_skip = self.original_fps  # Skip frames to process 1 FPS
+        self.effective_frame_skip = int(self.original_fps / self.config.FPS)
         
         os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-        self.buffer = deque(maxlen=config.CLIP_DURATION_SECONDS * config.FPS)
+        # Increase buffer size to capture more context before and after the event
+        self.buffer = deque(maxlen=config.CLIP_DURATION_SECONDS * self.original_fps * 2)  # Double the buffer size
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Add pre-buffer to store frames before detection
+        self.pre_buffer = deque(maxlen=self.original_fps * 5)  # Store 5 seconds before detection
 
-    def read_next_frame(self) -> Optional[Tuple[bool, any]]:
-        frames = []
-        for _ in range(self.config.BATCH_SIZE):
-            ret, frame = self.cap.read()
-            if ret:
-                frames.append(frame)
-        return frames if frames else None
+    def read_next_frame(self) -> Optional[np.ndarray]:
+        ret, frame = self.cap.read()
+        if not ret:
+            return None
+        return frame
 
     def save_clip(self, clip_index: int, threat_type: str) -> str:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        # Include threat type in filename
         filename = f"threat_{threat_type}_{timestamp}_{clip_index}.mp4"
         output_path = os.path.join(self.config.OUTPUT_DIR, filename)
 
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        writer = cv2.VideoWriter(output_path, fourcc, self.config.FPS, 
+        writer = cv2.VideoWriter(output_path, fourcc, self.original_fps,
                                (self.frame_width, self.frame_height))
         
-        # Add timestamp and threat type as overlay
+        # First write pre-buffer frames
+        for frame in self.pre_buffer:
+            writer.write(frame)
+        
+        # Then write main buffer frames
         for frame in self.buffer:
             # Add timestamp overlay
             cv2.putText(frame, datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -280,35 +361,103 @@ def main():
 
     frame_count = 0
     clip_index = 0
+    last_frame_time = time.time()
+    threat_detected = False
+    threat_start_time = None
+    last_threat_time = None
+    threat_type = None
+    consecutive_threat_frames = 0
+    post_threat_frames = 0
 
     logger.info("Beginning video analysis...")
+    start_time = time.time()
 
     try:
         while True:
             frame = processor.read_next_frame()
             if frame is None:
-                logger.info("End of video stream.")
+                # Save any remaining threat footage before ending
+                if threat_detected and processor.buffer:
+                    clip_path = processor.save_clip(clip_index, threat_type or "suspicious_activity")
+                    uploader.upload_clip(clip_path)
+                logger.info(f"End of video stream. Total processing time: {time.time() - start_time:.2f} seconds")
                 break
 
             frame_count += 1
+            
+            # Skip frames to improve performance
             if frame_count % config.FRAME_SKIP != 0:
+                # Still add to buffer but don't process
+                processor.buffer.append(frame.copy())
                 continue
 
-            is_threat, annotated_frame, threat_type = detector.detect_threat(frame)
-            processor.buffer[-1] = annotated_frame  # Replace the last frame with annotated one
+            # Smaller pre-buffer for efficiency
+            if len(processor.pre_buffer) < processor.pre_buffer.maxlen:
+                processor.pre_buffer.append(frame.copy())
+            
+            # Add to main buffer only if we're close to detecting a threat or already detected one
+            if threat_detected or consecutive_threat_frames > 0:
+                processor.buffer.append(frame.copy())
 
+            # Process frame for threat detection
+            is_threat, annotated_frame, current_threat_type = detector.detect_threat(frame)
+            
             if is_threat:
-                clip_path = processor.save_clip(clip_index, threat_type)
-                uploader.upload_clip(clip_path)
-                processor.buffer.clear()
-                clip_index += 1
+                if not threat_detected:
+                    threat_detected = True
+                    threat_start_time = time.time()
+                    threat_type = current_threat_type
+                    logger.warning(f"Threat detected: {threat_type}")
+                    # Start buffering frames
+                    processor.buffer.append(frame.copy())
+                
+                last_threat_time = time.time()
+                consecutive_threat_frames += 1
+                
+                # Replace the last frame in buffer with annotated version
+                if processor.buffer:
+                    processor.buffer[-1] = annotated_frame
+                
+                # Save clip after sufficient confirmation
+                if consecutive_threat_frames >= 2:
+                    clip_path = processor.save_clip(clip_index, threat_type)
+                    uploader.upload_clip(clip_path)
+                    processor.buffer.clear()
+                    processor.pre_buffer.clear()
+                    clip_index += 1
+                    threat_detected = False
+                    threat_start_time = None
+                    consecutive_threat_frames = 0
+            else:
+                # If we haven't seen a threat for more than 2 seconds, reset the threat state
+                if threat_detected and last_threat_time and (time.time() - last_threat_time) > 2:
+                    # Save the clip before resetting
+                    if processor.buffer:
+                        clip_path = processor.save_clip(clip_index, threat_type)
+                        uploader.upload_clip(clip_path)
+                        processor.buffer.clear()
+                        processor.pre_buffer.clear()
+                        clip_index += 1
+                    
+                    threat_detected = False
+                    threat_start_time = None
+                    consecutive_threat_frames = 0
+
+            # Progress reporting
+            if frame_count % 300 == 0:  # Report every ~300 frames
+                elapsed = time.time() - start_time
+                fps = frame_count / elapsed if elapsed > 0 else 0
+                logger.info(f"Processed {frame_count} frames in {elapsed:.2f} seconds ({fps:.2f} fps)")
 
     except Exception as ex:
         logger.exception(f"Unhandled exception: {ex}")
 
     finally:
         processor.release()
-        logger.info("Processing complete.")
+        total_time = time.time() - start_time
+        logger.info(f"Processing complete. Total time: {total_time:.2f} seconds for {frame_count} frames.")
+        if frame_count > 0 and total_time > 0:
+            logger.info(f"Average processing rate: {frame_count/total_time:.2f} fps")
 
 
 if __name__ == "__main__":
