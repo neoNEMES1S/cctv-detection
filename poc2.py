@@ -18,9 +18,9 @@ import time
 warnings.filterwarnings('ignore')
 
 class Config:
-    VIDEO_PATH: str = "96.mp4"
+    VIDEO_PATH: str = "95.mp4"
     OUTPUT_DIR: str = "output_clips"
-    FRAME_SKIP: int = 15  # Process more frames to catch fast-moving events
+    FRAME_SKIP: int = 5  # Reduced from 15 to catch more frames
     DETECTION_CLASSES: List[str] = [
         'person', 'truck', 'car', 'bus', 'motorcycle', 
         # Include more vehicle types to catch ram raids
@@ -29,7 +29,7 @@ class Config:
     FPS: int = 30
     UPLOAD_URL: Optional[str] = "https://your-api-endpoint.com/upload"
     YOLO_MODEL: str = 'yolov5m'  # Use medium model for better accuracy
-    CONFIDENCE_THRESHOLD: float = 0.25  # Lower threshold for better detection
+    CONFIDENCE_THRESHOLD: float = 0.15  # Lowered from 0.25 for better detection
     
     # Add time-based detection parameters
     SUSPICIOUS_HOUR_START: int = 22
@@ -37,15 +37,15 @@ class Config:
     
     # Add specific scenarios
     SUSPICIOUS_SCENARIOS = {
-        'multiple_people_night': {'min_people': 2, 'confidence': 0.4},
+        'multiple_people_night': {'min_people': 1, 'confidence': 0.2},  # Lowered thresholds
         'vehicle_near_atm': {
             'vehicle_types': ['truck', 'car', 'van'],
-            'confidence': 0.45
+            'confidence': 0.2
         },
-        'masked_person': {'confidence': 0.5},
+        'masked_person': {'confidence': 0.2},
         'tool_carrier': {
             'person_with_objects': ['backpack', 'suitcase', 'handbag'],
-            'confidence': 0.4
+            'confidence': 0.2
         }
     }
 
@@ -56,8 +56,8 @@ class Config:
     ATM_SCENARIOS = {
         'ram_raid': {
             'required_object': 'car',
-            'movement_threshold': 50,  # Pixel movement threshold
-            'confidence': 0.3
+            'movement_threshold': 30,  # Lowered from 50
+            'confidence': 0.2
         },
         # 'multiple_people_atm': {
         #     'min_people': 1,  # Even a single person at night is suspicious
@@ -82,7 +82,7 @@ class ThreatDetector:
         self.model = self._load_model()
         self.previous_frame = None
         self.previous_detections = []
-        self.motion_threshold = 5000  # Pixel difference threshold for significant motion
+        self.motion_threshold = 2000  # Lowered from 5000 for more sensitive motion detection
     
     def _load_model(self):
         logger.info("Loading YOLO model...")
