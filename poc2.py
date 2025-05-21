@@ -18,18 +18,19 @@ import time
 warnings.filterwarnings('ignore')
 
 class Config:
-    VIDEO_PATH: str = "95.mp4"
+    # Use Pi camera as input (device 0)
+    VIDEO_PATH: str = 0  # Use integer 0 for Pi camera
     OUTPUT_DIR: str = "output_clips"
-    FRAME_SKIP: int = 5  # Reduced from 15 to catch more frames
+    FRAME_SKIP: int = 10  # Increased to reduce load
     DETECTION_CLASSES: List[str] = [
-        'person', 'truck', 'car', 'bus', 'motorcycle', 
-        # Include more vehicle types to catch ram raids
+        'person', 'car', 'truck', 'bus'
     ]
     CLIP_DURATION_SECONDS: int = 10
-    FPS: int = 30
+    FPS: int = 10  # Lower FPS
     UPLOAD_URL: Optional[str] = "https://your-api-endpoint.com/upload"
-    YOLO_MODEL: str = 'yolov5m'  # Use medium model for better accuracy
-    CONFIDENCE_THRESHOLD: float = 0.15  # Lowered from 0.25 for better detection
+    YOLO_MODEL: str = 'yolov5n'  # Use nano model for speed
+    CONFIDENCE_THRESHOLD: float = 0.2
+    PROCESSING_RESOLUTION: Tuple[int, int] = (320, 240)  # Lower resolution
     
     # Add time-based detection parameters
     SUSPICIOUS_HOUR_START: int = 22
@@ -37,7 +38,7 @@ class Config:
     
     # Add specific scenarios
     SUSPICIOUS_SCENARIOS = {
-        'multiple_people_night': {'min_people': 1, 'confidence': 0.2},  # Lowered thresholds
+        'multiple_people_night': {'min_people': 1, 'confidence': 0.2},
         'vehicle_near_atm': {
             'vehicle_types': ['truck', 'car', 'van'],
             'confidence': 0.2
@@ -50,13 +51,13 @@ class Config:
     }
 
     # Performance optimization
-    PROCESSING_RESOLUTION: Tuple[int, int] = (640, 480)
+    PROCESSING_RESOLUTION: Tuple[int, int] = (320, 240)
 
     # Add ATM-specific scenarios
     ATM_SCENARIOS = {
         'ram_raid': {
             'required_object': 'car',
-            'movement_threshold': 30,  # Lowered from 50
+            'movement_threshold': 30,
             'confidence': 0.2
         },
         # 'multiple_people_atm': {
@@ -209,10 +210,10 @@ class ThreatDetector:
 class VideoProcessor:
     def __init__(self, config: Config):
         self.config = config
-        self.cap = cv2.VideoCapture(config.VIDEO_PATH)
+        # Use Pi camera (device 0) with V4L2 backend for Camera Module 3
+        self.cap = cv2.VideoCapture(config.VIDEO_PATH, cv2.CAP_V4L2)
         if not self.cap.isOpened():
-            raise IOError(f"Cannot open video file: {config.VIDEO_PATH}")
-        
+            raise IOError(f"Cannot open camera device: {config.VIDEO_PATH}")
         os.makedirs(config.OUTPUT_DIR, exist_ok=True)
         self.buffer = deque(maxlen=config.CLIP_DURATION_SECONDS * config.FPS)
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -220,40 +221,24 @@ class VideoProcessor:
         self.frame_count = 0
 
     def read_next_frame(self):
-        # Read a single frame
         ret, frame = self.cap.read()
         if not ret:
             return None
-            
-        # Add frame to buffer regardless of skipping
         self.buffer.append(frame)
-        
-        # Increment counter and skip frames as needed
         self.frame_count += 1
         if self.frame_count % self.config.FRAME_SKIP != 0:
             return None
-            
-        # We're processing this frame, return it
         return frame
 
     def save_clip(self, clip_index: int, threat_type: str) -> str:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f"threat_{threat_type}_{timestamp}_{clip_index}.mp4"
         output_path = os.path.join(self.config.OUTPUT_DIR, filename)
-
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         writer = cv2.VideoWriter(output_path, fourcc, self.config.FPS, 
                               (self.frame_width, self.frame_height))
-        
         for frame in self.buffer:
-            # Add timestamp overlay
-            cv2.putText(frame, datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                      (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            # Add threat type overlay
-            cv2.putText(frame, f"Threat: {threat_type}",
-                      (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
             writer.write(frame)
-            
         writer.release()
         logger.info(f"Saved suspicious clip to {output_path}")
         return output_path
